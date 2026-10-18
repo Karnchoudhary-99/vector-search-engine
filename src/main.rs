@@ -11,14 +11,28 @@
 //! vse bench  [--n 5000] [--dim 64] [--k 10]
 //!     Benchmark brute-force vs HNSW on synthetic clustered data:
 //!     build time, mean query latency, and recall@k.
+//!
+//! vse serve  [--port 3000] [--host 127.0.0.1] [--dim 128] [--m 16]
+//!            [--ef 200] [--query-ef 50] [--index <path>]
+//!     Start the REST API server (with a web demo at /). Loads <path> if it
+//!     exists, otherwise starts empty; on Ctrl-C the index is saved back to
+//!     <path> when --index was given.
 //! ```
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
-use vector_search_engine::{hnsw::HnswIndex, index::BruteForceIndex, persistence, text, Vector};
+use vector_search_engine::{
+    hnsw::HnswIndex,
+    index::BruteForceIndex,
+    persistence,
+    server::{self, ServerState},
+    text, Vector,
+};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let cmd = args.get(1).map(String::as_str).unwrap_or("help");
     let rest = &args[2..];
@@ -26,6 +40,7 @@ fn main() {
         "index" => cmd_index(rest),
         "search" => cmd_search(rest),
         "bench" => cmd_bench(rest),
+        "serve" => cmd_serve(rest).await,
         _ => {
             eprintln!("{}", usage());
             2
@@ -38,7 +53,8 @@ fn usage() -> &'static str {
     "usage:\n  \
      vse index  --texts <path> --out <path> [--dim 128] [--m 16] [--ef 200]\n  \
      vse search --index <path> --query <text> [--k 5] [--ef 50]\n  \
-     vse bench  [--n 5000] [--dim 64] [--k 10]"
+     vse bench  [--n 5000] [--dim 64] [--k 10]\n  \
+     vse serve  [--port 3000] [--dim 128] [--m 16] [--ef 200] [--query-ef 50] [--index <path>]"
 }
 
 /// Value of `--name <value>`; `None` when absent.
@@ -277,4 +293,74 @@ fn cmd_bench(args: &[String]) -> i32 {
 fn err(msg: &str) -> i32 {
     eprintln!("error: {msg}");
     1
+}
+
+// ---- serve ---------------------------------------------------------------
+
+async fn cmd_serve(args: &[String]) -> i32 {
+    let port: u16 = match flag_or(args, "--port", "3000").parse() {
+        Ok(p) => p,
+        Err(_) => return err("--port must be a valid port number"),
+    };
+    let host = flag_or(args, "--host", "127.0.0.1");
+    let dim = match parse_usize(args, "--dim", 128) {
+        Ok(d) if d > 0 => d,
+        _ => return err("--dim must be a positive integer"),
+    };
+    let m = match parse_usize(args, "--m", 16) {
+        Ok(v) if v > 0 => v,
+        _ => return err("--m must be a positive integer"),
+    };
+    let ef_construction = match parse_usize(args, "--ef", 200) {
+        Ok(v) => v,
+        Err(e) => return err(&e),
+    };
+    let query_ef = match parse_usize(args, "--query-ef", 50) {
+        Ok(v) => v,
+        Err(e) => return err(&e),
+    };
+    let index_path = flag(args, "--index").map(PathBuf::from);
+
+    let index = match &index_path {
+        Some(p) if p.exists() => match persistence::load(p) {
+            Ok(persistence::LoadedIndex::Hnsw(idx)) => {
+                println!("loaded index from {} ({} vectors)", p.display(), idx.len());
+                idx
+            }
+            Ok(persistence::LoadedIndex::Brute(_)) => {
+                return err("index file holds a brute-force index, expected HNSW")
+            }
+            Err(e) => return err(&format!("cannot load {}: {e}", p.display())),
+        },
+        _ => HnswIndex::new(dim, m, ef_construction),
+    };
+
+    let state = Arc::new(ServerState::new(index, query_ef));
+    let app = server::router(state.clone());
+    let addr = format!("{host}:{port}");
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => return err(&format!("cannot bind {addr}: {e}")),
+    };
+    println!("vector-search-engine serving on http://{addr}  (demo at /)");
+    println!("press Ctrl-C to stop");
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .ok();
+
+    // Persist on clean shutdown when an index path was given.
+    if let Some(p) = index_path {
+        match state.save_to(&p) {
+            Ok(()) => println!("saved index to {}", p.display()),
+            Err(e) => eprintln!("warning: could not save index: {e}"),
+        }
+    }
+    0
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    println!("\nshutting down…");
 }
