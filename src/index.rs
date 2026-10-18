@@ -55,6 +55,21 @@ impl BruteForceIndex {
     pub fn is_empty(&self) -> bool {
         self.vectors.is_empty()
     }
+
+    /// Vector dimensionality.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Iterate over `(id, vector)` entries in insertion order.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &Vector)> {
+        self.ids.iter().map(String::as_str).zip(self.vectors.iter())
+    }
+
+    /// Rebuild an index from parts (used by the persistence layer).
+    pub(crate) fn from_parts(dim: usize, ids: Vec<String>, vectors: Vec<Vector>) -> Self {
+        Self { dim, ids, vectors }
+    }
 }
 
 #[cfg(test)]
