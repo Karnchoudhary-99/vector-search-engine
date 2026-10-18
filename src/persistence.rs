@@ -170,14 +170,21 @@ impl HnswIndex {
             w.u8(n.deleted as u8)?;
             w.vector(&n.vector)?;
         }
-        for layer in self.raw_layers() {
-            w.u32(layer.len() as u32)?;
-            for (node, neigh) in layer {
-                w.u32(*node as u32)?;
-                w.u32(neigh.len() as u32)?;
-                for nb in neigh {
-                    w.u32(*nb as u32)?;
+        // Exactly max_level + 1 layer blocks, matching the loader. An empty
+        // index has no layers at all, so it writes a single empty block.
+        for lc in 0..=self.max_level() {
+            match self.raw_layers().get(lc) {
+                Some(layer) => {
+                    w.u32(layer.len() as u32)?;
+                    for (node, neigh) in layer {
+                        w.u32(*node as u32)?;
+                        w.u32(neigh.len() as u32)?;
+                        for nb in neigh {
+                            w.u32(*nb as u32)?;
+                        }
+                    }
                 }
+                None => w.u32(0)?,
             }
         }
         Ok(())
@@ -358,6 +365,19 @@ mod tests {
         let p = tmp("garbage.vse");
         std::fs::write(&p, b"definitely not an index").unwrap();
         assert!(load(&p).is_err());
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn empty_hnsw_roundtrip() {
+        // Regression: an empty index wrote zero layer blocks while the
+        // loader expected max_level + 1, corrupting the file.
+        let idx = HnswIndex::new(4, 8, 50);
+        let p = tmp("empty.vse");
+        idx.save(&p).unwrap();
+        let back = HnswIndex::load(&p).unwrap();
+        assert_eq!(back.len(), 0);
+        assert!(back.is_empty());
         std::fs::remove_file(p).ok();
     }
 
