@@ -1,0 +1,12 @@
+db-1	A vector database stores embeddings for similarity search
+db-2	PostgreSQL is a relational database with SQL support
+db-3	HNSW graphs enable fast approximate nearest neighbor search
+db-4	Redis can be used as an in-memory cache and message broker
+db-5	Cosine similarity measures the angle between embedding vectors
+db-6	A recipe for chocolate cake with cocoa and flour
+ml-1	Transformers use self-attention over token embeddings
+ml-2	Gradient descent optimizes neural network weights
+ml-3	k-means clusters points by nearest centroid
+web-1	HTTP load balancers distribute requests across servers
+web-2	WebSockets keep a persistent bidirectional connection open
+web-3	A CDN caches static assets at edge locations
