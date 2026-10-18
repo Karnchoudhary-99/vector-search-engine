@@ -1,0 +1,15 @@
+[package]
+name = "vector-search-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Blazing-fast vector similarity search engine — semantic search over documents with a lightweight ANN index."
+license = "MIT"
+repository = "https://github.com/Karnchoudhary-99/vector-search-engine"
+
+[[bin]]
+name = "vse"
+path = "src/main.rs"
+
+[lib]
+name = "vector_search_engine"
+path = "src/lib.rs"
