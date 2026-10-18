@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vector Search Engine — demo</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.4rem; }
+  .card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+  input[type=text] { width: 70%; padding: .5rem; font-size: 1rem; }
+  button { padding: .5rem 1rem; font-size: 1rem; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+  td, th { text-align: left; padding: .4rem; border-bottom: 1px solid #eee; }
+  .score { font-variant-numeric: tabular-nums; color: #555; }
+  #stats { color: #555; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>&#x1F50D; Vector Search Engine — live demo</h1>
+<p id="stats">loading stats&hellip;</p>
+
+<div class="card">
+  <h3>Add a document</h3>
+  <input type="text" id="doc-id" placeholder="id, e.g. doc-7">
+  <input type="text" id="doc-text" placeholder="text to embed &amp; index">
+  <button onclick="addDoc()">Add</button>
+  <span id="add-status"></span>
+</div>
+
+<div class="card">
+  <h3>Search</h3>
+  <input type="text" id="query" placeholder="type a query&hellip;">
+  <button onclick="doSearch()">Search</button>
+  <table id="results"><thead><tr><th>id</th><th>score</th></tr></thead><tbody></tbody></table>
+</div>
+
+<script>
+async function refreshStats() {
+  const r = await fetch('/stats');
+  const s = await r.json();
+  document.getElementById('stats').textContent =
+    `${s.vectors} vectors indexed (dim=${s.dim}, tombstones=${s.tombstones})`;
+}
+async function addDoc() {
+  const id = document.getElementById('doc-id').value.trim();
+  const text = document.getElementById('doc-text').value.trim();
+  if (!id || !text) return;
+  const r = await fetch('/vectors/text', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({id, text}),
+  });
+  const j = await r.json();
+  document.getElementById('add-status').textContent =
+    r.ok ? `added (now ${j.vectors} vectors)` : `error: ${j.error}`;
+  refreshStats();
+}
+async function doSearch() {
+  const text = document.getElementById('query').value.trim();
+  if (!text) return;
+  const r = await fetch('/search/text', {
+    method: 'POST', headers: {'content-type': 'application/json'},
+    body: JSON.stringify({text, k: 10}),
+  });
+  const j = await r.json();
+  const tbody = document.querySelector('#results tbody');
+  tbody.innerHTML = '';
+  for (const h of j.hits || []) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${h.id}</td><td class="score">${h.score.toFixed(4)}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+document.getElementById('query').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+refreshStats();
+</script>
+</body>
+</html>

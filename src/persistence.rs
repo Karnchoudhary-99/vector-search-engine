@@ -1,9 +1,10 @@
 //! Binary persistence for indexes.
 //!
-//! Versioned little-endian format (`VSE1` magic):
+//! Versioned little-endian format (`VSE1` magic, format revisions in the
+//! 4th magic byte):
 //!
 //! ```text
-//! magic:      b'V' b'S' b'E' 0x01
+//! magic:      b'V' b'S' b'E' <version: 0x01 or 0x02>
 //! kind:       u8   (0 = brute force, 1 = HNSW)
 //! dim:        u32
 //! -- brute force -----------------------------------------------
@@ -14,11 +15,14 @@
 //! entry_point: i32  (-1 = none)
 //! rng_state:  u64   (splitmix64 stream, so post-load inserts continue it)
 //! count:      u32
-//! per node:   id_len u32, id bytes, level u32, dim × f32
+//! per node:   id_len u32, id bytes, level u32, [deleted u8, VSE2+], dim × f32
 //! layers:     for lc in 0..=max_level:
 //!                 edge_count u32
 //!                 per edge: node u32, degree u32, degree × u32 neighbor ids
 //! ```
+//!
+//! Version 0x02 adds the per-node tombstone flag (`deleted`); the loader
+//! accepts both revisions (0x01 files load with all flags clear).
 //!
 //! The HNSW graph is persisted verbatim (not rebuilt), so a loaded index
 //! answers queries identically to the one that was saved.
@@ -31,7 +35,8 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
-const MAGIC: [u8; 4] = [b'V', b'S', b'E', 0x01];
+const MAGIC: [u8; 3] = *b"VSE";
+const VERSION: u8 = 0x02;
 const KIND_BRUTE: u8 = 0;
 const KIND_HNSW: u8 = 1;
 
@@ -122,6 +127,7 @@ impl BruteForceIndex {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let mut w = Writer(BufWriter::new(File::create(path)?));
         w.0.write_all(&MAGIC)?;
+        w.u8(VERSION)?;
         w.u8(KIND_BRUTE)?;
         w.u32(self.dim() as u32)?;
         let entries: Vec<(&str, &Vector)> = self.entries().collect();
@@ -147,6 +153,7 @@ impl HnswIndex {
     pub fn save(&self, path: &Path) -> io::Result<()> {
         let mut w = Writer(BufWriter::new(File::create(path)?));
         w.0.write_all(&MAGIC)?;
+        w.u8(VERSION)?;
         w.u8(KIND_HNSW)?;
         w.u32(self.dim() as u32)?;
         w.u32(self.m() as u32)?;
@@ -160,16 +167,24 @@ impl HnswIndex {
         for n in nodes {
             w.bytes(n.id.as_bytes())?;
             w.u32(n.level as u32)?;
+            w.u8(n.deleted as u8)?;
             w.vector(&n.vector)?;
         }
-        for layer in self.raw_layers() {
-            w.u32(layer.len() as u32)?;
-            for (node, neigh) in layer {
-                w.u32(*node as u32)?;
-                w.u32(neigh.len() as u32)?;
-                for nb in neigh {
-                    w.u32(*nb as u32)?;
+        // Exactly max_level + 1 layer blocks, matching the loader. An empty
+        // index has no layers at all, so it writes a single empty block.
+        for lc in 0..=self.max_level() {
+            match self.raw_layers().get(lc) {
+                Some(layer) => {
+                    w.u32(layer.len() as u32)?;
+                    for (node, neigh) in layer {
+                        w.u32(*node as u32)?;
+                        w.u32(neigh.len() as u32)?;
+                        for nb in neigh {
+                            w.u32(*nb as u32)?;
+                        }
+                    }
                 }
+                None => w.u32(0)?,
             }
         }
         Ok(())
@@ -187,8 +202,10 @@ impl HnswIndex {
 /// Load whatever index kind `path` holds.
 pub fn load(path: &Path) -> io::Result<LoadedIndex> {
     let mut r = Reader(BufReader::new(File::open(path)?));
-    if r.read_exact::<4>()? != MAGIC {
-        return Err(bad("not a VSE1 index file (bad magic)"));
+    let magic = r.read_exact::<3>()?;
+    let version = r.u8()?;
+    if magic != MAGIC || (version != 0x01 && version != VERSION) {
+        return Err(bad("not a VSE1 index file (bad magic or version)"));
     }
     let kind = r.u8()?;
     let dim = r.u32()? as usize;
@@ -225,8 +242,18 @@ pub fn load(path: &Path) -> io::Result<LoadedIndex> {
             for _ in 0..count {
                 let id = r.id()?;
                 let level = r.u32()? as usize;
+                let deleted = if version == VERSION {
+                    r.u8()? != 0
+                } else {
+                    false
+                };
                 let vector = r.vector(dim)?;
-                nodes.push(Node { id, vector, level });
+                nodes.push(Node {
+                    id,
+                    vector,
+                    level,
+                    deleted,
+                });
             }
             let mut layers: Vec<HashMap<usize, Vec<usize>>> = Vec::with_capacity(max_level + 1);
             for _ in 0..=max_level {
@@ -338,6 +365,66 @@ mod tests {
         let p = tmp("garbage.vse");
         std::fs::write(&p, b"definitely not an index").unwrap();
         assert!(load(&p).is_err());
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn empty_hnsw_roundtrip() {
+        // Regression: an empty index wrote zero layer blocks while the
+        // loader expected max_level + 1, corrupting the file.
+        let idx = HnswIndex::new(4, 8, 50);
+        let p = tmp("empty.vse");
+        idx.save(&p).unwrap();
+        let back = HnswIndex::load(&p).unwrap();
+        assert_eq!(back.len(), 0);
+        assert!(back.is_empty());
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn hnsw_tombstones_survive_roundtrip() {
+        let mut idx = sample_hnsw();
+        assert!(idx.remove("b"));
+        let p = tmp("hnsw-tomb.vse");
+        idx.save(&p).unwrap();
+        let back = HnswIndex::load(&p).unwrap();
+        assert_eq!(back.len(), 3);
+        assert_eq!(back.tombstones(), 1);
+        assert!(!back.contains("b"));
+        let hits = back.search(&Vector::new(vec![0.0, 1.0, 0.0]), 5, 20);
+        assert!(hits.iter().all(|(id, _)| id != "b"));
+        std::fs::remove_file(p).ok();
+    }
+
+    #[test]
+    fn legacy_v1_file_loads_with_clear_tombstones() {
+        // Hand-write a 0x01-format HNSW file (no per-node deleted flag).
+        let p = tmp("legacy-v1.vse");
+        {
+            let mut buf: Vec<u8> = Vec::new();
+            buf.extend_from_slice(b"VSE");
+            buf.push(0x01);
+            buf.push(1u8); // KIND_HNSW
+            buf.extend_from_slice(&3u32.to_le_bytes()); // dim
+            buf.extend_from_slice(&8u32.to_le_bytes()); // m
+            buf.extend_from_slice(&50u32.to_le_bytes()); // ef_construction
+            buf.extend_from_slice(&0u32.to_le_bytes()); // max_level
+            buf.extend_from_slice(&(-1i32).to_le_bytes()); // no entry
+            buf.extend_from_slice(&0u64.to_le_bytes()); // rng
+            buf.extend_from_slice(&1u32.to_le_bytes()); // 1 node
+            buf.extend_from_slice(&1u32.to_le_bytes()); // id len
+            buf.push(b'x'); // id
+            buf.extend_from_slice(&0u32.to_le_bytes()); // level
+            for x in [1.0f32, 0.0, 0.0] {
+                buf.extend_from_slice(&x.to_le_bytes());
+            }
+            buf.extend_from_slice(&0u32.to_le_bytes()); // layer 0: no edges
+            std::fs::write(&p, buf).unwrap();
+        }
+        let back = HnswIndex::load(&p).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back.tombstones(), 0);
+        assert!(back.contains("x"));
         std::fs::remove_file(p).ok();
     }
 }

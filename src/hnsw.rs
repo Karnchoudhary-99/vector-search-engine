@@ -60,12 +60,14 @@ impl Ord for Scored {
     }
 }
 
-/// One stored vector: its external id, normalized components, and top layer.
+/// One stored vector: its external id, normalized components, top layer,
+/// and soft-delete flag (tombstones keep the graph navigable).
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     pub(crate) id: String,
     pub(crate) vector: Vector,
     pub(crate) level: usize,
+    pub(crate) deleted: bool,
 }
 
 /// Hierarchical Navigable Small World index for approximate top-K search.
@@ -91,6 +93,10 @@ pub struct HnswIndex {
     nodes: Vec<Node>,
     /// `layers[lc][node]` = neighbor node indices on layer `lc`.
     layers: Vec<HashMap<usize, Vec<usize>>>,
+    /// External id -> node slot (includes tombstoned slots).
+    id_lookup: HashMap<String, usize>,
+    /// Vectors that are not tombstoned.
+    live: usize,
     rng: u64,
 }
 
@@ -115,22 +121,34 @@ impl HnswIndex {
             entry_point: None,
             nodes: Vec::new(),
             layers: Vec::new(),
+            id_lookup: HashMap::new(),
+            live: 0,
             rng: seed,
         }
     }
 
     /// Insert a vector under `id`. The vector is normalized on the way in.
+    ///
+    /// If `id` already exists and is live, the old entry is soft-deleted
+    /// first (upsert semantics) — ids stay unique among live vectors.
     /// Panics on dimension mismatch.
     pub fn add(&mut self, id: impl Into<String>, v: Vector) {
         assert_eq!(v.len(), self.dim, "vector dimension mismatch");
+        let id = id.into();
+        if self.contains(&id) {
+            self.remove(&id);
+        }
         let vector = v.normalized();
         let level = self.random_level();
         let node = self.nodes.len();
         self.nodes.push(Node {
-            id: id.into(),
+            id: id.clone(),
             vector,
             level,
+            deleted: false,
         });
+        self.id_lookup.insert(id, node);
+        self.live += 1;
         while self.layers.len() <= level {
             self.layers.push(HashMap::new());
         }
@@ -168,6 +186,9 @@ impl HnswIndex {
     /// Approximate top-K search. Returns up to `top_k` `(id, cosine_similarity)`
     /// pairs, best first. `ef` controls the recall/latency trade-off at query
     /// time (values below `top_k` are raised to `top_k`).
+    ///
+    /// Soft-deleted (tombstoned) vectors are skipped: the search over-fetches
+    /// to compensate, so results still contain up to `top_k` *live* vectors.
     pub fn search(&self, query: &Vector, top_k: usize, ef: usize) -> Vec<(String, f32)> {
         assert_eq!(query.len(), self.dim, "query dimension mismatch");
         if top_k == 0 {
@@ -182,22 +203,56 @@ impl HnswIndex {
             cur = self.greedy_search(&q, cur, lc);
         }
 
-        let ef = ef.max(top_k).max(1);
-        let mut hits = self.search_layer(&q, cur, ef, 0);
-        hits.truncate(top_k);
-        hits.into_iter()
-            .map(|s| (self.nodes[s.node].id.clone(), 1.0 - s.dist.0))
-            .collect()
+        let tombstones = self.nodes.len() - self.live;
+        let fetch = top_k + tombstones;
+        let ef = ef.max(fetch).max(1);
+        let hits = self.search_layer(&q, cur, ef, 0);
+        let mut out = Vec::with_capacity(top_k.min(self.live));
+        for s in hits {
+            if !self.nodes[s.node].deleted {
+                out.push((self.nodes[s.node].id.clone(), 1.0 - s.dist.0));
+                if out.len() == top_k {
+                    break;
+                }
+            }
+        }
+        out
     }
 
-    /// Number of indexed vectors.
+    /// Soft-delete the vector stored under `id` (tombstone). The node stays in
+    /// the graph so routing remains navigable; it is simply skipped by search
+    /// and `len()`. Returns `true` when a live entry was deleted.
+    pub fn remove(&mut self, id: &str) -> bool {
+        match self.id_lookup.get(id) {
+            Some(&node) if !self.nodes[node].deleted => {
+                self.nodes[node].deleted = true;
+                self.live -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// True when a live (non-deleted) vector exists under `id`.
+    pub fn contains(&self, id: &str) -> bool {
+        self.id_lookup
+            .get(id)
+            .is_some_and(|&n| !self.nodes[n].deleted)
+    }
+
+    /// Number of live (non-deleted) vectors.
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.live
     }
 
-    /// True when the index holds nothing.
+    /// Number of soft-deleted (tombstoned) vectors.
+    pub fn tombstones(&self) -> usize {
+        self.nodes.len() - self.live
+    }
+
+    /// True when the index holds no live vectors.
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.live == 0
     }
 
     /// Vector dimensionality.
@@ -398,6 +453,16 @@ impl HnswIndex {
         layers: Vec<HashMap<usize, Vec<usize>>>,
         rng: u64,
     ) -> Self {
+        let mut id_lookup = HashMap::with_capacity(nodes.len());
+        let mut live = 0;
+        for (slot, node) in nodes.iter().enumerate() {
+            // Later slots win for duplicate ids, matching `add`'s upsert
+            // semantics on re-insert.
+            id_lookup.insert(node.id.clone(), slot);
+            if !node.deleted {
+                live += 1;
+            }
+        }
         Self {
             dim,
             m,
@@ -407,6 +472,8 @@ impl HnswIndex {
             entry_point,
             nodes,
             layers,
+            id_lookup,
+            live,
             rng,
         }
     }
@@ -535,5 +602,56 @@ mod tests {
     fn rejects_wrong_dimension_on_search() {
         let idx = HnswIndex::new(2, 8, 50);
         idx.search(&v(&[1.0]), 5, 10);
+    }
+
+    #[test]
+    fn remove_hides_vector_from_search() {
+        let mut idx = HnswIndex::with_seed(2, 8, 50, 3);
+        idx.add("a", v(&[1.0, 0.0]));
+        idx.add("b", v(&[0.0, 1.0]));
+        idx.add("c", v(&[-1.0, 0.0]));
+        assert!(idx.remove("b"));
+        assert!(!idx.remove("b")); // already gone
+        assert!(!idx.remove("nope")); // never existed
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.tombstones(), 1);
+        assert!(!idx.contains("b"));
+        assert!(idx.contains("a"));
+
+        let hits = idx.search(&v(&[0.0, 1.0]), 5, 20);
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|(id, _)| id != "b"));
+    }
+
+    #[test]
+    fn add_with_duplicate_id_replaces_old_vector() {
+        let mut idx = HnswIndex::with_seed(2, 8, 50, 5);
+        idx.add("dup", v(&[1.0, 0.0]));
+        idx.add("dup", v(&[0.0, 1.0])); // upsert: old entry tombstoned
+        assert_eq!(idx.len(), 1);
+        assert_eq!(idx.tombstones(), 1);
+        let hits = idx.search(&v(&[0.0, 1.0]), 1, 20);
+        assert_eq!(hits[0].0, "dup");
+        assert!(hits[0].1 > 0.99);
+    }
+
+    #[test]
+    fn search_still_returns_top_k_after_many_deletes() {
+        let mut idx = HnswIndex::with_seed(4, 16, 100, 11);
+        for i in 0..100 {
+            idx.add(
+                format!("d{i}"),
+                v(&[(i % 7) as f32, (i % 5) as f32, 1.0, 0.5]),
+            );
+        }
+        for i in (0..100).step_by(2) {
+            idx.remove(&format!("d{i}"));
+        }
+        assert_eq!(idx.len(), 50);
+        let hits = idx.search(&v(&[1.0, 1.0, 1.0, 0.5]), 10, 100);
+        assert_eq!(hits.len(), 10);
+        assert!(hits
+            .iter()
+            .all(|(id, _)| { id.strip_prefix('d').unwrap().parse::<usize>().unwrap() % 2 == 1 }));
     }
 }
