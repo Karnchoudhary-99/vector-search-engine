@@ -255,12 +255,21 @@ fn cmd_bench(args: &[String]) -> i32 {
     let hnsw_q = t0.elapsed() / queries.len() as u32;
     let recall = hits as f64 / (queries.len() * k) as f64;
 
-    println!("vectors: {n}, dim: {dim}, k: {k}, queries: {}", queries.len());
-    println!("build:    brute-force {:>8.0} ms | HNSW {:>8.0} ms",
-        brute_build.as_secs_f64() * 1000.0, hnsw_build.as_secs_f64() * 1000.0);
-    println!("query:    brute-force {:>8.1} µs | HNSW {:>8.1} µs  ({:.0}x faster)",
-        brute_q.as_secs_f64() * 1e6, hnsw_q.as_secs_f64() * 1e6,
-        brute_q.as_secs_f64() / hnsw_q.as_secs_f64().max(1e-9));
+    println!(
+        "vectors: {n}, dim: {dim}, k: {k}, queries: {}",
+        queries.len()
+    );
+    println!(
+        "build:    brute-force {:>8.0} ms | HNSW {:>8.0} ms",
+        brute_build.as_secs_f64() * 1000.0,
+        hnsw_build.as_secs_f64() * 1000.0
+    );
+    println!(
+        "query:    brute-force {:>8.1} µs | HNSW {:>8.1} µs  ({:.0}x faster)",
+        brute_q.as_secs_f64() * 1e6,
+        hnsw_q.as_secs_f64() * 1e6,
+        brute_q.as_secs_f64() / hnsw_q.as_secs_f64().max(1e-9)
+    );
     println!("recall@{k}: {recall:.4}");
     0
 }

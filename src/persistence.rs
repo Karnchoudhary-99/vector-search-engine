@@ -12,6 +12,7 @@
 //! -- HNSW ------------------------------------------------------
 //! m, ef_construction, max_level: u32 × 3
 //! entry_point: i32  (-1 = none)
+//! rng_state:  u64   (splitmix64 stream, so post-load inserts continue it)
 //! count:      u32
 //! per node:   id_len u32, id bytes, level u32, dim × f32
 //! layers:     for lc in 0..=max_level:
@@ -45,6 +46,9 @@ struct Writer<W: Write>(W);
 impl<W: Write> Writer<W> {
     fn u8(&mut self, v: u8) -> io::Result<()> {
         self.0.write_all(&[v])
+    }
+    fn u64(&mut self, v: u64) -> io::Result<()> {
+        self.0.write_all(&v.to_le_bytes())
     }
     fn u32(&mut self, v: u32) -> io::Result<()> {
         self.0.write_all(&v.to_le_bytes())
@@ -80,6 +84,9 @@ impl<R: Read> Reader<R> {
     }
     fn u32(&mut self) -> io::Result<u32> {
         Ok(u32::from_le_bytes(self.read_exact::<4>()?))
+    }
+    fn u64(&mut self) -> io::Result<u64> {
+        Ok(u64::from_le_bytes(self.read_exact::<8>()?))
     }
     fn i32(&mut self) -> io::Result<i32> {
         Ok(i32::from_le_bytes(self.read_exact::<4>()?))
@@ -146,6 +153,7 @@ impl HnswIndex {
         w.u32(self.ef_construction() as u32)?;
         w.u32(self.max_level() as u32)?;
         w.i32(self.entry_point().map(|e| e as i32).unwrap_or(-1))?;
+        w.u64(self.rng_state())?;
 
         let nodes = self.raw_nodes();
         w.u32(nodes.len() as u32)?;
@@ -211,6 +219,7 @@ pub fn load(path: &Path) -> io::Result<LoadedIndex> {
             } else {
                 Some(entry_raw as usize)
             };
+            let rng = r.u64()?;
             let count = r.u32()? as usize;
             let mut nodes = Vec::with_capacity(count);
             for _ in 0..count {
@@ -237,9 +246,9 @@ pub fn load(path: &Path) -> io::Result<LoadedIndex> {
                 }
                 layers.push(layer);
             }
-            // A fixed seed keeps level assignment reproducible for vectors
-            // added after loading; stored levels are unaffected.
-            let rng = 0x1234_5678_9ABC_DEF0;
+            // The RNG stream continues from the saved state, so vectors added
+            // after loading draw levels exactly as if the index had never
+            // been serialized.
             Ok(LoadedIndex::Hnsw(HnswIndex::from_parts(
                 dim,
                 m,

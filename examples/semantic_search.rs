@@ -7,11 +7,26 @@ use vector_search_engine::{hnsw::HnswIndex, text};
 
 fn main() {
     let docs = [
-        ("db-1", "A vector database stores embeddings for similarity search"),
-        ("db-2", "PostgreSQL is a relational database with SQL support"),
-        ("db-3", "HNSW graphs enable fast approximate nearest neighbor search"),
-        ("db-4", "Redis can be used as an in-memory cache and message broker"),
-        ("db-5", "Cosine similarity measures the angle between embedding vectors"),
+        (
+            "db-1",
+            "A vector database stores embeddings for similarity search",
+        ),
+        (
+            "db-2",
+            "PostgreSQL is a relational database with SQL support",
+        ),
+        (
+            "db-3",
+            "HNSW graphs enable fast approximate nearest neighbor search",
+        ),
+        (
+            "db-4",
+            "Redis can be used as an in-memory cache and message broker",
+        ),
+        (
+            "db-5",
+            "Cosine similarity measures the angle between embedding vectors",
+        ),
         ("db-6", "A recipe for chocolate cake with cocoa and flour"),
     ];
     let dim = 128;
@@ -24,7 +39,11 @@ fn main() {
     let query = "fast vector database for similarity search";
     println!("query: {query}\n");
     for (id, score) in idx.search(&text::embed(query, dim), 3, 50) {
-        let doc = docs.iter().find(|(d, _)| *d == id).map(|(_, t)| *t).unwrap();
+        let doc = docs
+            .iter()
+            .find(|(d, _)| *d == id)
+            .map(|(_, t)| *t)
+            .unwrap();
         println!("{score:.4}  {id}  — {doc}");
     }
 }

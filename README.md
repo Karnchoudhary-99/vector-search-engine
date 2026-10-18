@@ -92,12 +92,13 @@ let idx2 = HnswIndex::load("docs.vse".as_ref()).unwrap();
 
 | vectors | dim | build (brute) | build (HNSW) | query (brute) | query (HNSW) | recall@10 |
 |--------:|----:|--------------:|-------------:|--------------:|-------------:|----------:|
-| 5,000   | 64  | ~120 ms       | ~1.8 s       | ~380 µs       | ~28 µs       | 0.998     |
+| 5,000   | 64  | 1 ms          | 1.03 s       | 1217 µs       | 191 µs       | 1.0000    |
 
-*(numbers from a dev-machine run; yours will vary — run it yourself)*
+*(measured with `vse bench --n 5000 --dim 64 --k 10`; dev-machine run —
+run it yourself)*
 
-HNSW trades a slower one-time build for ~10–15× faster queries at
-near-perfect recall.
+HNSW trades a slower one-time build for ~6× faster queries at perfect
+recall on this workload. Raise per-query `ef` for harder datasets.
 
 ## On-disk format
 

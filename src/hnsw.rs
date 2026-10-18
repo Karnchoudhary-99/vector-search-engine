@@ -151,7 +151,7 @@ impl HnswIndex {
         // Phase 2: beam-search and connect on every layer down to 0.
         for lc in (0..=level.min(self.max_level)).rev() {
             let candidates = self.search_layer(&query, cur, self.ef_construction, lc);
-            let neighbors: Vec<usize> = Self::select_neighbors(&self.nodes, &query, candidates, self.m)
+            let neighbors: Vec<usize> = Self::select_neighbors(&self.nodes, candidates, self.m)
                 .into_iter()
                 .map(|s| s.node)
                 .collect();
@@ -262,9 +262,15 @@ impl HnswIndex {
         let d0 = Dist(dist(query, &self.nodes[entry].vector));
         // `candidates`: min-heap (closest first). `found`: max-heap (farthest first).
         let mut candidates: BinaryHeap<Reverse<Scored>> = BinaryHeap::new();
-        candidates.push(Reverse(Scored { dist: d0, node: entry }));
+        candidates.push(Reverse(Scored {
+            dist: d0,
+            node: entry,
+        }));
         let mut found: BinaryHeap<Scored> = BinaryHeap::new();
-        found.push(Scored { dist: d0, node: entry });
+        found.push(Scored {
+            dist: d0,
+            node: entry,
+        });
 
         while let Some(Reverse(cur)) = candidates.pop() {
             let worst = found.peek().expect("found is never empty").dist;
@@ -296,12 +302,7 @@ impl HnswIndex {
     /// HNSW neighbor-selection heuristic: prefer candidates that are closer to
     /// the query than to any already-selected neighbor (diversity pruning),
     /// then fill up with the closest remaining candidates.
-    fn select_neighbors(
-        nodes: &[Node],
-        query: &Vector,
-        mut candidates: Vec<Scored>,
-        m: usize,
-    ) -> Vec<Scored> {
+    fn select_neighbors(nodes: &[Node], mut candidates: Vec<Scored>, m: usize) -> Vec<Scored> {
         let mut selected: Vec<Scored> = Vec::with_capacity(m);
         for c in candidates.drain(..) {
             if selected.len() >= m {
@@ -356,7 +357,7 @@ impl HnswIndex {
                     })
                     .collect();
                 cands.sort();
-                let pruned = Self::select_neighbors(&self.nodes, &qv, cands, m);
+                let pruned = Self::select_neighbors(&self.nodes, cands, m);
                 self.layers[lc].insert(n, pruned.into_iter().map(|s| s.node).collect());
             }
         }
@@ -386,6 +387,7 @@ impl HnswIndex {
 
     /// Rebuild an index from persisted parts. `layers` must be consistent with
     /// `nodes` (as written by the persistence layer).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         dim: usize,
         m: usize,
@@ -472,8 +474,11 @@ mod tests {
             let center: Vec<f32> = (0..8).map(|d| (c * 8 + d) as f32).collect();
             for i in 0..60 {
                 let jitter = |k: usize| ((i * 31 + k * 17 + c * 13) % 100) as f32 / 100.0 - 0.5;
-                let comps: Vec<f32> =
-                    center.iter().enumerate().map(|(d, x)| x + jitter(d)).collect();
+                let comps: Vec<f32> = center
+                    .iter()
+                    .enumerate()
+                    .map(|(d, x)| x + jitter(d))
+                    .collect();
                 data.push(v(&comps));
             }
         }
@@ -482,8 +487,11 @@ mod tests {
         }
 
         let query = v(&[4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]); // near cluster 0
-        let approx: Vec<String> =
-            hnsw.search(&query, 10, 100).into_iter().map(|(id, _)| id).collect();
+        let approx: Vec<String> = hnsw
+            .search(&query, 10, 100)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
 
         let qn = query.normalized();
         let mut scored: Vec<(f32, String)> = data
