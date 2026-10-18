@@ -17,10 +17,13 @@ exact brute-force index as the ground-truth baseline.
 - [x] Distance metrics: euclidean, cosine, manhattan
 - [x] Brute-force top-K similarity index (correctness baseline)
 - [x] **HNSW approximate-nearest-neighbor index** (from scratch, no deps)
-- [x] Versioned binary persistence (`VSE1` format; graph saved verbatim)
-- [x] CLI: `index` / `search` / `bench` subcommands
+- [x] Soft-delete (tombstones): `remove(id)`, upsert-by-id, over-fetch search
+- [x] Versioned binary persistence (`VSE1` magic; loader reads 0x01 and 0x02;
+      graph saved verbatim)
+- [x] CLI: `index` / `search` / `bench` / `serve` subcommands
+- [x] **REST API** (`vse serve`): upsert, text search, delete, save/load —
+      plus a web demo page at `/`
 - [x] Demo-grade text embedder (hashed n-grams — zero model downloads)
-- [ ] HTTP server (`/index`, `/search`)
 
 ## Architecture
 
@@ -70,6 +73,41 @@ Sample search output:
 0.7519	db-5  — Cosine similarity measures the angle between embedding vectors
 ```
 
+## REST API
+
+```bash
+# Start the server (loads docs.vse if it exists; saves back on Ctrl-C)
+cargo run --release -- serve --port 3000 --index docs.vse
+
+# The web demo lives at http://localhost:3000/
+```
+
+| Method | Endpoint         | Body                              | Purpose                          |
+|--------|------------------|-----------------------------------|----------------------------------|
+| GET    | `/`              | —                                 | Web demo (add docs + search)     |
+| GET    | `/health`        | —                                 | Service status                   |
+| GET    | `/stats`         | —                                 | Index stats (vectors, tombstones)|
+| POST   | `/vectors`       | `{"id", "vector": [...]}`          | Upsert a vector (id is unique)   |
+| POST   | `/vectors/text`  | `{"id", "text"}`                  | Upsert; text is embedded server-side |
+| DELETE | `/vectors/:id`   | —                                 | Soft-delete a vector             |
+| POST   | `/search`        | `{"vector", "k"?, "ef"?}`         | Top-k similar vectors            |
+| POST   | `/search/text`   | `{"text", "k"?, "ef"?}`           | Top-k for a text query           |
+| POST   | `/save`          | `{"path"}`                        | Persist the index to disk        |
+| POST   | `/load`          | `{"path"}`                        | Replace the live index from disk |
+
+```bash
+curl -X POST localhost:3000/vectors/text \
+     -H 'content-type: application/json' \
+     -d '{"id": "doc-1", "text": "vector databases for semantic search"}'
+
+curl -X POST localhost:3000/search/text \
+     -H 'content-type: application/json' \
+     -d '{"text": "fast similarity search", "k": 5}'
+# {"hits":[{"id":"doc-1","score":0.8231}, …]}
+
+curl -X DELETE localhost:3000/vectors/doc-1
+```
+
 ## Library usage
 
 ```rust
@@ -102,9 +140,11 @@ recall on this workload. Raise per-query `ef` for harder datasets.
 
 ## On-disk format
 
-`VSE1`: magic bytes + kind tag + dimensionality, then entries (brute force)
-or nodes + full layer graphs (HNSW), all little-endian. See
-`src/persistence.rs` for the exact layout.
+`VSE1`: magic bytes (`VSE` + format revision `0x01` or `0x02`) + kind tag +
+dimensionality, then entries (brute force) or nodes + full layer graphs
+(HNSW), all little-endian. Revision `0x02` adds the per-node tombstone flag
+for soft deletes; the loader reads both revisions. See `src/persistence.rs`
+for the exact layout.
 
 ## Project layout
 
@@ -114,10 +154,14 @@ src/
   vector.rs       dense Vector type + linear algebra
   distance.rs     euclidean / cosine / manhattan metrics
   index.rs        exact brute-force top-K index (ground truth)
-  hnsw.rs         approximate HNSW index  ← the interesting part
-  persistence.rs  VSE1 binary save/load
+  hnsw.rs         approximate HNSW index + soft-delete  ← the interesting part
+  persistence.rs  VSE1 binary save/load (revisions 0x01/0x02)
+  server.rs       axum REST API (upsert / search / delete / save / load)
+  demo.html       web demo served at / by `vse serve`
   text.rs         deterministic demo text embeddings
-  main.rs         `vse` CLI (index / search / bench)
+  main.rs         `vse` CLI (index / search / bench / serve)
+tests/
+  rest_api.rs     REST API integration tests
 examples/
   semantic_search.rs   end-to-end demo
 data/
